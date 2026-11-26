@@ -11,6 +11,7 @@ import { DEFAULT_WATERFALL_FPS } from './src/dsp/spectrum.mjs';
 import { DEFAULT_IQ_QUEUE_MS, DEFAULT_PCM_QUEUE_MS, makeStreamer } from './src/dsp/stream.mjs';
 import { makeDiscordNotifier } from './src/remote/discord.mjs';
 import { loadIdentity, saveIdentity } from './src/remote/identity.mjs';
+import { loadPeerFactory } from './src/remote/peer-engine.mjs';
 import { FFT_SIZE, RECEIVER_ID } from './src/remote/protocol.mjs';
 import { describeAudioTransport, loadIceServers, openSignaling } from './src/remote/signaling.mjs';
 
@@ -32,6 +33,7 @@ const help = `Usage: node runner.mjs [options]
   --stats               Print capture, DSP, queue and audio transport stats every 10 seconds
   --keep-locks          Keep shared RF controls locked
   --relay-only          Use TURN relay candidates on the native host
+  --webrtc ENGINE       auto (prefers libwebrtc), libwebrtc, or libdatachannel
   --help                Display usage
 
 Environment:
@@ -55,6 +57,7 @@ function parseOptions() {
     stats: { type: 'boolean' },
     'keep-locks': { type: 'boolean' },
     'relay-only': { type: 'boolean' },
+    webrtc: { type: 'string', default: 'auto' },
     help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) return null;
@@ -89,6 +92,9 @@ function parseOptions() {
   if (values['waterfall-fps'] === '' || !Number.isInteger(waterfallFps) || waterfallFps < 0 || waterfallFps > DEFAULT_WATERFALL_FPS) {
     throw new Error(`--waterfall-fps must be an integer from 0 to ${DEFAULT_WATERFALL_FPS}.`);
   }
+  if (!['auto', 'libwebrtc', 'libdatachannel'].includes(values.webrtc)) {
+    throw new Error('--webrtc must be auto, libwebrtc, or libdatachannel.');
+  }
   const dspDir = values['dsp-dir'] === undefined ? undefined : resolve(values['dsp-dir']);
   const stateDir = resolve(values['state-dir'] ?? join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'browsdr-runner'));
   const authSite = new URL(process.env.BROWSDR_AUTH_ORIGIN || DEFAULT_URL);
@@ -103,7 +109,7 @@ function parseOptions() {
   }
   return {
     site, backend, device, serial: values.serial, frequency, sampleRate, stateDir, headers, dspDir, queueMs, pcmQueueMs, waterfallFps,
-    diagnostics: !!values.stats,
+    diagnostics: !!values.stats, webrtc: values.webrtc,
     locked: !!values['keep-locks'], relayOnly: !!values['relay-only'],
   };
 }
@@ -119,6 +125,8 @@ async function main() {
     return;
   }
   const { site, backend, device, headers } = options;
+  const { engine, createPeer } = await loadPeerFactory(options.webrtc, log);
+  log(`WebRTC engine: ${engine}.`);
   const signalController = new AbortController();
   for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, () => signalController.abort());
   const { signal } = signalController;
@@ -132,7 +140,7 @@ async function main() {
   const locks = Object.fromEntries(['centerFreq', 'sampleRate', ...Object.keys(gains)].map((key) => [key, options.locked]));
   const clients = new Set();
   const streamer = await makeStreamer(device.capabilities.sampleFormat, { ...options, log });
-  const statsTimer = options.diagnostics ? setInterval(() => {
+  const statsTimer = options.diagnostics ? setInterval(async () => {
     const stats = streamer.takeStats();
     log(`Stats (10s): clients=${stats.clients}, IQ slices=${stats.slices}, capture callbacks=${stats.callbacks}, `
       + `capture gap max=${stats.maxArrivalGapMs.toFixed(1)}ms, DSP/send work=${stats.processingMs.toFixed(0)}ms `
@@ -140,11 +148,13 @@ async function main() {
       + `blocked blocks=${stats.blockedBlocks}, discarded IQ values=${stats.discardedValues}, accepted IQ packets=${stats.sentPackets}, `
       + `slice runs=${stats.sliceRuns}/${stats.subscriberBlocks} subscriptions, `
       + `accepted PCM packets=${stats.pcmPackets}, PCM queue max≈${stats.maxPcmQueueMs.toFixed(1)}ms (limit ${options.pcmQueueMs}ms), `
-      + `discarded PCM frames=${stats.discardedPcmFrames}, packets queued by native channel=${stats.nativeQueuedPackets}, `
+      + `discarded PCM frames=${stats.discardedPcmFrames}, `
+      + (engine === 'libdatachannel' ? `packets queued by native channel=${stats.nativeQueuedPackets}, ` : '')
       + `native send errors=${stats.sendErrors}.`);
     if (clients.size) {
-      const paths = Array.from(clients, (client) => `${client.iq ? 'IQ' : 'PCM'} ${describeAudioTransport(client)}`);
-      log(`Audio transport (per client): ${paths.join(' | ')}`);
+      const paths = await Promise.all(Array.from(clients, async (client) =>
+        `${client.iq ? 'IQ' : 'PCM'} ${await describeAudioTransport(client)}`));
+      if (!signal.aborted) log(`Audio transport (per client): ${paths.join(' | ')}`);
     }
   }, 10000) : undefined;
   let receiving = false;
@@ -232,7 +242,7 @@ async function main() {
       try {
         const iceServers = await loadIceServers(backend, headers, signal);
         reason = await openSignaling({
-          site, backend, headers, ...identity, iceServers, signal, relayOnly: options.relayOnly, log,
+          site, backend, headers, ...identity, iceServers, createPeer, signal, relayOnly: options.relayOnly, log,
           onOpen() {
             retry = 1000;
             registeredCode = identity.code;

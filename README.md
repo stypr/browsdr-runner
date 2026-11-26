@@ -68,6 +68,21 @@ For **Host (audio)**, rising `discarded PCM frames` alongside a full send queue 
 
 For a slow remote path, use `--waterfall-fps 5` to reduce the spectrum and waterfall data sent by the runner. This lowers the maximum FFT payload from about 331 kbps to 83 kbps per listener. Try `--waterfall-fps 0` to isolate audio with the display stream disabled. Tuning and audio still work, and the official site needs no update for this option. This helps if the streams are competing for available bandwidth.
 
+### WebRTC engine and high latency connections
+
+The default `--webrtc auto` selects libwebrtc at startup and uses libdatachannel if the optional libwebrtc binary cannot load. The startup log shows which engine was selected. Both engines use the same share link. [libwebrtc binding](https://github.com/WonderInventions/node-webrtc) · [libdatachannel platform support](https://github.com/murat-dogan/node-datachannel#supported-platforms)
+
+On a tested TURN relay path at about 455 ms RTT, switching to libwebrtc restored stable **Host (audio)** playback after startup. The runner reported about 1.55 Mbps of mono PCM output, with no queued or discarded PCM in the measured interval. If you want to require libwebrtc for a high latency connection, install the optional binary and select it explicitly.
+
+```bash
+npm ci --include=optional
+npm start -- --webrtc libwebrtc --stats
+```
+
+The install command includes the optional `@roamhq/wrtc` package. Keep any existing site, sample rate, and state directory options. The test run also used `--iq-queue-ms 250`, which applies only to **This device (IQ)**.
+
+To compare engines or force the fallback, run the same command with `--webrtc libdatachannel`. Stop one runner before starting the other, then reuse the same share link, browser, station, and decoding mode. Check that the selected ICE paths are comparable. Watch playback and the `discarded PCM frames` counter after the first minute. The libdatachannel log reports SCTP input and SCTP RTT. The libwebrtc log reports DataChannel output and ICE RTT.
+
 ## Upstream compatibility
 
 The runner uses PeerJS `cmd` / `fft` / `audio` channels, BrowSDR Remote IQ v1, and the existing PCM packet format. It sends host PCM to clients that configure a VFO without requesting IQ. The upstream `main` commit `255ceef490d90733a26baa6c0fde9c2b7d3fb0ef`, checked on 2026-11-26, includes Remote IQ and subdirectory hosting. The Docker build pins that commit by default; change `BROWSDR_REF` only after checking the build patch and both decoding modes. [Checked main commit](https://github.com/jLynx/BrowSDR/tree/255ceef490d90733a26baa6c0fde9c2b7d3fb0ef)

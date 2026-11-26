@@ -1,4 +1,3 @@
-import { PeerConnection } from 'node-datachannel';
 import WebSocket from 'ws';
 import { pack, unpack } from 'peerjs-js-binarypack';
 
@@ -26,49 +25,49 @@ export async function loadIceServers(backend, headers, signal) {
   if (!response.ok) throw new Error(`GET ${endpoint.pathname} returned HTTP ${response.status}`);
   const { iceServers } = await response.json();
   if (!Array.isArray(iceServers)) throw new Error(`Missing iceServers in ${endpoint.pathname}`);
-  const servers = [];
-  for (const entry of iceServers) {
-    for (const uri of [entry.urls].flat()) {
-      if (typeof uri !== 'string' || !/^(stun|turns?):/i.test(uri)) continue;
-      if (uri.startsWith('stun:')) {
-        servers.push(uri);
-        continue;
-      }
-      const url = new URL(uri.replace(/^turns?:/i, 'http://'));
-      const tls = uri.startsWith('turns:');
-      servers.push({
-        hostname: url.hostname, port: Number(url.port || (tls ? 5349 : 3478)),
-        username: entry.username, password: entry.credential,
-        relayType: tls ? 'TurnTls' : url.searchParams.get('transport') === 'tcp' ? 'TurnTcp' : 'TurnUdp',
-      });
-    }
-  }
-  return servers;
+  return iceServers.flatMap((entry) => {
+    const urls = [entry?.urls].flat().filter((uri) => typeof uri === 'string' && /^(stun|turns?):/i.test(uri));
+    if (!urls.length) return [];
+    return [{
+      urls,
+      ...(typeof entry.username === 'string' ? { username: entry.username } : {}),
+      ...(typeof entry.credential === 'string' ? { credential: entry.credential } : {}),
+    }];
+  });
 }
 
-export function describeAudioTransport(client, now = performance.now()) {
+function nativeTransportStats(pc) {
+  const pair = pc.getSelectedCandidatePair();
+  if (!pair) return null;
+  return {
+    route: `${pair.local.type}/${pair.local.transportType} → ${pair.remote.type}/${pair.remote.transportType}`,
+    rtt: pc.rtt(),
+    bytes: pc.bytesSent(),
+    rateLabel: 'SCTP input',
+  };
+}
+
+export async function describeAudioTransport(client, now = performance.now()) {
   const audio = [...client.connections.values()].find(({ label }) => label === 'audio');
   if (!audio) return 'path unavailable';
   try {
     const { pc } = audio;
-    const pair = pc.getSelectedCandidatePair();
-    if (!pair) return 'path unavailable';
-    const rtt = pc.rtt();
-    const route = `${pair.local.type}/${pair.local.transportType} → ${pair.remote.type}/${pair.remote.transportType}`;
-    const bytes = pc.bytesSent();
+    const stats = pc.transportStats ? await pc.transportStats() : nativeTransportStats(pc);
+    if (!stats) return 'path unavailable';
+    const { route, rtt, rateLabel, bytes } = stats;
     const previous = audioRateSamples.get(pc);
     audioRateSamples.set(pc, { bytes, now });
     const rate = previous && bytes >= previous.bytes && now > previous.now
       ? `${Math.round(8 * (bytes - previous.bytes) / (now - previous.now))} kbps`
       : 'unavailable';
-    return `${route}, RTT ${rtt >= 0 ? `${rtt} ms` : 'unavailable'}, SCTP input ${rate}`;
+    return `${route}, RTT ${rtt >= 0 ? `${rtt} ms` : 'unavailable'}, ${rateLabel} ${rate}`;
   } catch {
     // A closing native connection can stop reporting statistics between polls.
     return 'path unavailable';
   }
 }
 
-export function openSignaling({ site, backend, headers, code, token, iceServers, relayOnly, signal, onOpen, onClient, onCommand, onLeave, log }) {
+export function openSignaling({ site, backend, headers, code, token, iceServers, relayOnly, createPeer, signal, onOpen, onClient, onCommand, onLeave, log }) {
   const address = signalingAddress(site, backend, code, token);
   // Never forward a site's proxy credentials to an external PeerServer.
   const signalHeaders = address.origin === `wss://${backend.host}` ? headers : {};
@@ -123,6 +122,12 @@ export function openSignaling({ site, backend, headers, code, token, iceServers,
     return client;
   }
 
+  function negotiationFailed(client, error) {
+    if (clients.get(client.id) !== client) return;
+    log(`Peer negotiation failed: ${error.message}`);
+    drop(client.id);
+  }
+
   function offer(src, payload) {
     const { label, connectionId, sdp, type } = payload;
     if (type !== 'data' || !LABELS.has(label) || sdp?.type !== 'offer' || typeof sdp.sdp !== 'string') return;
@@ -130,7 +135,7 @@ export function openSignaling({ site, backend, headers, code, token, iceServers,
     if (!client) return;
     if (client.connections.has(connectionId)) return;
     if ([...client.connections.values()].some((connection) => connection.label === label)) return;
-    const pc = new PeerConnection(`${src}/${label}`, {
+    const pc = createPeer(`${src}/${label}`, {
       iceServers, maxMessageSize: MAX_SIGNAL, iceTransportPolicy: relayOnly ? 'relay' : 'all',
     });
     client.connections.set(connectionId, { label, pc });
@@ -175,7 +180,7 @@ export function openSignaling({ site, backend, headers, code, token, iceServers,
       });
       ready();
     });
-    pc.setRemoteDescription(sdp.sdp, 'offer');
+    Promise.resolve(pc.setRemoteDescription(sdp.sdp, 'offer')).catch((error) => negotiationFailed(client, error));
   }
 
   ws.on('pong', () => { pong = true; });
@@ -204,17 +209,15 @@ export function openSignaling({ site, backend, headers, code, token, iceServers,
       if (typeof payload?.connectionId !== 'string' || payload.connectionId.length > 128) return;
       if (message.type === 'OFFER') offer(src, payload);
       if (message.type === 'CANDIDATE') {
-        const connection = clients.get(src)?.connections.get(payload.connectionId);
+        const client = clients.get(src);
+        const connection = client?.connections.get(payload.connectionId);
         const { candidate, sdpMid } = payload.candidate ?? {};
         if (connection && typeof candidate === 'string' && candidate && typeof sdpMid === 'string') {
-          connection.pc.addRemoteCandidate(candidate, sdpMid);
+          Promise.resolve(connection.pc.addRemoteCandidate(candidate, sdpMid)).catch((error) => negotiationFailed(client, error));
         }
       }
     } catch (error) {
-      if (src && clients.has(src)) {
-        log(`Peer negotiation failed: ${error.message}`);
-        drop(src);
-      }
+      if (src && clients.has(src)) negotiationFailed(clients.get(src), error);
     }
   });
 
