@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,6 +17,7 @@ const DEFAULT_URL = 'https://browsdr.jlynx.net/';
 
 const help = `Usage: node runner.mjs [options]
   --url URL             BrowSDR HTTPS site (default: ${DEFAULT_URL})
+  --backend-url URL     Backend base URL if API and PeerServer are mounted elsewhere
   --device TYPE         rtl-sdr (default) or hackrf
   --serial ID           RTL index/serial or HackRF serial
   --frequency HZ        Initial center frequency (default: 99900000)
@@ -36,6 +38,7 @@ Environment:
 function parseOptions() {
   const { values } = parseArgs({ options: {
     url: { type: 'string', default: DEFAULT_URL },
+    'backend-url': { type: 'string' },
     device: { type: 'string', default: 'rtl-sdr' },
     serial: { type: 'string' },
     frequency: { type: 'string' },
@@ -49,10 +52,15 @@ function parseOptions() {
     help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) return null;
-  const site = new URL(values.url);
-  if (site.protocol !== 'https:' || site.username || site.password || site.pathname !== '/' || site.search || site.hash) {
-    throw new Error('--url must be a BrowSDR HTTPS origin.');
-  }
+  const parseBase = (value, option) => {
+    const base = new URL(value);
+    if (base.protocol !== 'https:' || base.username || base.password || !base.pathname.endsWith('/') || base.search || base.hash) {
+      throw new Error(`${option} must be an HTTPS directory URL ending in /.`);
+    }
+    return base;
+  };
+  const site = parseBase(values.url, '--url');
+  const backend = values['backend-url'] ? parseBase(values['backend-url'], '--backend-url') : site;
   if (!Object.hasOwn(devices, values.device)) throw new Error('--device must be rtl-sdr or hackrf.');
   const device = devices[values.device];
   if (values.serial !== undefined && !/^[a-z0-9_-]{1,80}$/i.test(values.serial)) throw new Error('Invalid --serial.');
@@ -75,12 +83,12 @@ function parseOptions() {
     throw new Error('BROWSDR_AUTH_ORIGIN must be an HTTPS origin.');
   }
   const headers = {};
-  if (site.origin === authSite.origin) {
+  if (backend.origin === authSite.origin) {
     if (process.env.BROWSDR_AUTHORIZATION) headers.Authorization = process.env.BROWSDR_AUTHORIZATION;
     if (process.env.BROWSDR_COOKIE) headers.Cookie = process.env.BROWSDR_COOKIE;
   }
   return {
-    site, device, serial: values.serial, frequency, sampleRate, stateDir, headers, dspDir, queueMs,
+    site, backend, device, serial: values.serial, frequency, sampleRate, stateDir, headers, dspDir, queueMs,
     diagnostics: !!values.stats,
     locked: !!values['keep-locks'], relayOnly: !!values['relay-only'],
   };
@@ -96,7 +104,7 @@ async function main() {
     console.log(help);
     return;
   }
-  const { site, device, headers } = options;
+  const { site, backend, device, headers } = options;
   const signalController = new AbortController();
   for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, () => signalController.abort());
   const { signal } = signalController;
@@ -193,7 +201,8 @@ async function main() {
 
   try {
     await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
-    const identityPath = join(options.stateDir, `${site.host.replaceAll(':', '_')}-${device.capabilities.deviceType}.json`);
+    const pathSuffix = site.pathname === '/' ? '' : `-${createHash('sha256').update(site.pathname).digest('hex').slice(0, 12)}`;
+    const identityPath = join(options.stateDir, `${site.host.replaceAll(':', '_')}${pathSuffix}-${device.capabilities.deviceType}.json`);
     const identity = await loadIdentity(identityPath);
     await saveIdentity(identityPath, identity);
     capture.configure(requestedRadio, requestedGains);
@@ -202,9 +211,9 @@ async function main() {
     while (!signal.aborted) {
       let reason;
       try {
-        const iceServers = await loadIceServers(site, headers, signal);
+        const iceServers = await loadIceServers(backend, headers, signal);
         reason = await openSignaling({
-          site, headers, ...identity, iceServers, signal, relayOnly: options.relayOnly, log,
+          site, backend, headers, ...identity, iceServers, signal, relayOnly: options.relayOnly, log,
           onOpen() {
             retry = 1000;
             registeredCode = identity.code;

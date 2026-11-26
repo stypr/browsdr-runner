@@ -1,4 +1,4 @@
-// Remote IQ v1, verified against BrowSDR at 6c914c571435b514d40ec79a814acd1c79580f7c.
+// Remote IQ v1 layout matches BrowSDR main at 255ceef490d90733a26baa6c0fde9c2b7d3fb0ef.
 export const RECEIVER_ID = 'native-sdr';
 export const FFT_SIZE = 2048;
 export const AUDIO_RATE = 48000;

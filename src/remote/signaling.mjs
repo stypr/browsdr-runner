@@ -7,23 +7,24 @@ const LABELS = new Set(['cmd', 'fft', 'audio']);
 const MAX_SIGNAL = 65536;
 const MAX_CLIENTS = 8;
 
-export function signalingAddress(site, code, token) {
+export function signalingAddress(site, backend, code, token) {
   // The official BrowSDR frontend uses PeerJS Cloud; the LAN build uses its own PeerServer.
   const address = site.hostname.endsWith('.jlynx.net')
     ? new URL('wss://0.peerjs.com/peerjs')
-    : new URL('/signal/peerjs', site); // Local ones
+    : new URL('signal/peerjs', backend);
   address.protocol = 'wss:';
   address.search = new URLSearchParams({ key: 'peerjs', id: `browsdr-${code}`, token, version: '1.5.5' });
   return address;
 }
 
-export async function loadIceServers(site, headers, signal) {
-  const response = await fetch(new URL('/api/turn', site), {
+export async function loadIceServers(backend, headers, signal) {
+  const endpoint = new URL('api/turn', backend);
+  const response = await fetch(endpoint, {
     headers, redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
   });
-  if (!response.ok) throw new Error(`GET /api/turn returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`GET ${endpoint.pathname} returned HTTP ${response.status}`);
   const { iceServers } = await response.json();
-  if (!Array.isArray(iceServers)) throw new Error('Missing iceServers in /api/turn');
+  if (!Array.isArray(iceServers)) throw new Error(`Missing iceServers in ${endpoint.pathname}`);
   const servers = [];
   for (const entry of iceServers) {
     for (const uri of [entry.urls].flat()) {
@@ -44,10 +45,10 @@ export async function loadIceServers(site, headers, signal) {
   return servers;
 }
 
-export function openSignaling({ site, headers, code, token, iceServers, relayOnly, signal, onOpen, onClient, onCommand, onLeave, log }) {
-  const address = signalingAddress(site, code, token);
+export function openSignaling({ site, backend, headers, code, token, iceServers, relayOnly, signal, onOpen, onClient, onCommand, onLeave, log }) {
+  const address = signalingAddress(site, backend, code, token);
   // Never forward a site's proxy credentials to an external PeerServer.
-  const signalHeaders = address.origin === `wss://${site.host}` ? headers : {};
+  const signalHeaders = address.origin === `wss://${backend.host}` ? headers : {};
   const ws = new WebSocket(address, { headers: signalHeaders, maxPayload: MAX_SIGNAL, handshakeTimeout: 10000 });
   const clients = new Map();
   let closeError = 'Signaling disconnected';

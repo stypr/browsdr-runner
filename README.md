@@ -4,7 +4,7 @@ A Node.js CLI for sharing an SDR continuously from Linux. It starts USB capture 
 
 ## Getting started
 
-You need Node.js 24 or later, the tools for your SDR, and a BrowSDR deployment. The selected site must serve `/api/turn`. The LAN build uses its PeerServer at `/signal/peerjs`; the official site uses PeerJS Cloud at `0.peerjs.com/peerjs`. If you use the earlier Dockerfile, a build that includes the `fix/remote-audio-buffering` branch lets clients select either decoding mode. Keep a BrowSDR checkout in the runner repository's `BrowSDR/` directory, or use `--dsp-dir` to point to a verified WASM bundle.
+You need Node.js 24 or later, the tools for your SDR, and a BrowSDR deployment. The selected site's backend must serve `api/turn` below its base URL. The LAN docker build on `sdr/` folder runs its PeerServer at `signal/peerjs` below that base; the official site uses PeerJS Cloud at `0.peerjs.com/peerjs`. The `sdr/` Docker build pins a current BrowSDR `main` commit with Remote IQ support. Keep a BrowSDR checkout in the runner repository's `BrowSDR/` directory, or use `--dsp-dir` to point to a verified WASM bundle.
 
 On Debian and Ubuntu, `rtl_tcp` is included in the `rtl-sdr` package. The runner starts it itself on the loopback address `127.0.0.1`, so you do not need a separate service or an exposed port.
 
@@ -38,7 +38,7 @@ For narrow VFOs, the host demodulates at a lower IF sample rate. In IQ mode, the
 
 By default, clients can change the shared center frequency, sample rate, and exposed gains. RTL-SDR applies these settings while keeping the device open. When clients send repeated requests, the runner applies only the latest value for each setting at 200 ms intervals. A gain change keeps IQ transmission running. After a center frequency or sample rate change, the runner briefly discards samples to reduce mixing of IQ from the old setting. Available gain steps depend on the tuner. Because `rtl_tcp` has no command acknowledgement, the values shown in the UI reflect settings processed by the runner. Changing shared HackRF settings reopens capture. Use `--keep-locks` to lock shared settings.
 
-The default site is `https://browsdr.jlynx.net/`. To use the personal site instead, run `npm start -- --url https://sdr.internal/`. The runner selects the matching signaling server for each site. `npm start` enables Node's system CA support. Install your server's internal CA into the Linux host trust store, or set `NODE_EXTRA_CA_CERTS=/path/to/internal-root.pem` in the runner's environment. If Caddy requires authentication, set `BROWSDR_AUTHORIZATION` or `BROWSDR_COOKIE` to the complete header value. These headers are sent only to `BROWSDR_AUTH_ORIGIN`, which defaults to the LAN site. Set that variable to a different HTTPS origin if needed. Proxy credentials are never sent to PeerJS Cloud.
+The default site is `https://browsdr.jlynx.net/`. To use the personal site instead, run `npm start -- --url https://sdr.internal/`. Select one site per runner invocation. A site mounted at `/sdr/` can be selected with `--url https://sdr.internal/sdr/`; its default backend paths become `/sdr/api/turn` and `/sdr/signal/peerjs`. If the frontend was built with `VITE_BACKEND_URL=/`, also pass `--backend-url https://sdr.internal/`. `npm start` enables Node's system CA support. Install your server's internal CA into the Linux host trust store, or set `NODE_EXTRA_CA_CERTS=/path/to/internal-root.pem` in the runner's environment. If Caddy requires authentication, set `BROWSDR_AUTHORIZATION` or `BROWSDR_COOKIE` to the complete header value and set `BROWSDR_AUTH_ORIGIN` to the backend's HTTPS origin. Proxy credentials are never sent to PeerJS Cloud.
 
 ## Checking latency
 
@@ -65,7 +65,28 @@ If audio arrives late, compare these metrics with the receiving browser's **Play
 
 ## Upstream compatibility
 
-The runner uses PeerJS `cmd` / `fft` / `audio` channels, BrowSDR Remote IQ v1, and the existing PCM packet format. It sends host PCM to clients that configure a VFO without requesting IQ. The upstream `main` commit `0135a685`, checked on 2026-11-24, does not have a Remote IQ client. If you need IQ mode, pin BrowSDR to `6c914c571435b514d40ec79a814acd1c79580f7c`, which includes Remote IQ, or to a later commit you have tested. [Remote IQ support commit](https://github.com/jLynx/BrowSDR/tree/6c914c571435b514d40ec79a814acd1c79580f7c) · [Checked main commit](https://github.com/jLynx/BrowSDR/tree/0135a6855bf236525f0a90d1a4bdf726516de038)
+The runner uses PeerJS `cmd` / `fft` / `audio` channels, BrowSDR Remote IQ v1, and the existing PCM packet format. It sends host PCM to clients that configure a VFO without requesting IQ. The upstream `main` commit `255ceef490d90733a26baa6c0fde9c2b7d3fb0ef`, checked on 2026-11-26, includes Remote IQ and subdirectory hosting. The Docker build pins that commit by default; change `BROWSDR_REF` only after checking the build patch and both decoding modes. [Checked main commit](https://github.com/jLynx/BrowSDR/tree/255ceef490d90733a26baa6c0fde9c2b7d3fb0ef)
+
+### Self-hosted frontend container
+
+Build the files in `sdr/` with the same `build.context: ./sdr/` used by the existing Compose setup. The image serves BrowSDR, PeerServer, `/api/turn`, and `/api/geo` through HTTP port 8080; Let web servers handle HTTPS. The image still needs your separate coturn service. Set `TURN_LAN_IP` to the address reachable by clients and use the same `TURN_PASSWORD` as coturn.
+
+```yaml
+sdr:
+  build:
+    context: ./sdr/
+    args:
+      BROWSDR_REF: 255ceef490d90733a26baa6c0fde9c2b7d3fb0ef
+      VITE_BASE_PATH: /                 # Set /sdr/ if web server exposes the app there
+      VITE_BACKEND_URL: ''              # Set / if the APIs stay at the domain root
+  environment:
+    TURN_LAN_IP: ${TURN_LAN_IP}
+    TURN_PASSWORD: ${TURN_PASSWORD:?Set TURN_PASSWORD in .env}
+```
+
+The build defaults to serving everything at `/`. For `/sdr/`, set `VITE_BASE_PATH=/sdr/` and route both `/sdr` and `/sdr/*` through Caddy to port 8080. The backend follows that base unless `VITE_BACKEND_URL` selects another path. Set `--url` to the matching frontend URL and, when overriding the backend path, set `--backend-url` to its full HTTPS base URL. `VITE_BASE_PATH` and `VITE_BACKEND_URL` are build settings, so rebuild after changing them. This container supports a same-origin backend path; an absolute cross-origin backend needs a separate server and CORS configuration. The build patch fails if the pinned BrowSDR source no longer matches its expected signaling or ICE handling code.
+
+If your Compose file still passes `BROWSDR_REF: ${BROWSDR_REF}`, update that `.env` value to the commit above or remove the override; otherwise it will keep building the older branch. This container does not provide the optional `/hf-proxy/` transcription model endpoint.
 
 By default, the WASM bundle is loaded from `BrowSDR/wasm/dsp/pkg/` in the runner repository. If you pin a separate bundle, point `--dsp-dir` to a directory containing `browsdr_dsp.js`, `browsdr_dsp_bg.wasm`, and `package.json` from the same build.
 
