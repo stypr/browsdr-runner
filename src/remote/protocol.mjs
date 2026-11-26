@@ -42,20 +42,28 @@ export function fftPacket(power) {
   return frame;
 }
 
+function pcmPayloadOffset(channels) {
+  return receiverPrefix.length + (channels === 2 ? 16 : 0);
+}
+
+export function pcmPacketSize(sampleCount, channels) {
+  return pcmPayloadOffset(channels) + sampleCount * Float32Array.BYTES_PER_ELEMENT;
+}
+
 // Legacy BrowSDR uses raw mono Float32. Stereo uses a 16-byte SDR2 header.
 export function pcmPacket(samples, channels) {
-  const stereoHeaderSize = channels === 2 ? 16 : 0;
   const start = receiverPrefix.length;
-  const packet = Buffer.allocUnsafe(start + stereoHeaderSize + samples.length * 4);
+  const offset = pcmPayloadOffset(channels);
+  const packet = Buffer.allocUnsafe(pcmPacketSize(samples.length, channels));
   receiverPrefix.copy(packet);
-  if (stereoHeaderSize) {
+  if (channels === 2) {
     packet.write('SDR2', start);
     packet.writeUInt32LE(1, start + 4);
     packet.writeUInt32LE(2, start + 8);
     packet.writeUInt32LE(AUDIO_RATE, start + 12);
   }
   for (let i = 0; i < samples.length; i++) {
-    packet.writeFloatLE(Math.max(-1, Math.min(1, samples[i])), start + stereoHeaderSize + i * 4);
+    packet.writeFloatLE(Math.max(-1, Math.min(1, samples[i])), offset + i * Float32Array.BYTES_PER_ELEMENT);
   }
   return packet;
 }

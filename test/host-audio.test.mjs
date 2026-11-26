@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { AUDIO_RATE, pcmPacket } from '../src/remote/protocol.mjs';
+import { AUDIO_RATE, pcmPacket, pcmPacketSize } from '../src/remote/protocol.mjs';
 import { makeStreamer } from '../src/dsp/stream.mjs';
 
 const radio = { centerFreq: 100, sampleRate: 2048000 };
@@ -70,9 +70,13 @@ function toneAmplitude(samples, hz) {
 }
 
 test('host PCM keeps the mono and SDR2 stereo packet formats', () => {
-  assert.equal(pcmPacket(Float32Array.of(0.5, -0.5), 1).subarray(envelopeSize).toString('hex'), '0000003f000000bf');
-  assert.equal(pcmPacket(Float32Array.of(0.5, -0.5), 2).subarray(envelopeSize).toString('hex'),
-    '53445232010000000200000080bb00000000003f000000bf');
+  const samples = Float32Array.of(0.5, -0.5);
+  const mono = pcmPacket(samples, 1);
+  const stereo = pcmPacket(samples, 2);
+  assert.equal(pcmPacketSize(samples.length, 1), mono.length);
+  assert.equal(pcmPacketSize(samples.length, 2), stereo.length);
+  assert.equal(mono.subarray(envelopeSize).toString('hex'), '0000003f000000bf');
+  assert.equal(stereo.subarray(envelopeSize).toString('hex'), '53445232010000000200000080bb00000000003f000000bf');
 });
 
 for (const mode of ['wfm', 'nfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']) {

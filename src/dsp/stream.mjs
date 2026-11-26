@@ -1,5 +1,6 @@
 import { HostAudioVfo, hostAudioSettings } from './host-audio.mjs';
-import { AUDIO_RATE, IQ_OVERHEAD, MAX_IQ_VALUES, iqPacket, pcmPacket } from '../remote/protocol.mjs';
+import { AUDIO_RATE, IQ_OVERHEAD, MAX_IQ_VALUES, iqPacket, pcmPacket, pcmPacketSize } from '../remote/protocol.mjs';
+import { trySendBinary } from '../remote/transport/channel.mjs';
 import { IF_RATES, planSlice } from './iq-plan.mjs';
 import { DEFAULT_WATERFALL_FPS, makeSpectrum } from './spectrum.mjs';
 import { loadDsp } from './wasm.mjs';
@@ -10,16 +11,6 @@ const MIN_VFO_BANDWIDTH = 50;
 const MAX_VFOS = 8;
 export const DEFAULT_IQ_QUEUE_MS = 80;
 export const DEFAULT_PCM_QUEUE_MS = 80;
-
-function send(channel, packet) {
-  // The transport can close between isOpen() and sending on the native channel.
-  try {
-    // false means libdatachannel kept the packet for a later send.
-    return channel.sendMessageBinary(packet) !== false;
-  } catch {
-    return null;
-  }
-}
 
 function emptyStats() {
   return { callbacks: 0, maxArrivalGapMs: 0, processingMs: 0, maxProcessingMs: 0,
@@ -199,7 +190,7 @@ export async function makeStreamer(inputFormat, {
           index, revision: vfo.revision, sequence: vfo.sequence, plan: slice.plan, discontinuity: vfo.discontinuity,
         }, samples, slice.scale);
         vfo.sequence = (vfo.sequence + 1) >>> 0;
-        const submitted = send(channel, packet);
+        const submitted = trySendBinary(channel, packet);
         vfo.discontinuity = submitted === null;
         if (diagnostics) {
           if (vfo.discontinuity) {
@@ -258,9 +249,8 @@ export async function makeStreamer(inputFormat, {
       for (const { audio, gain } of active) audio.mixInto(output, frames, channels, gain);
       const queued = channel.bufferedAmount();
       if (diagnostics) stats.maxPcmQueueMs = Math.max(stats.maxPcmQueueMs, queued / bytesPerMs);
-      const packet = pcmPacket(output, channels);
-      if (queued + packet.length <= budget) {
-        const submitted = send(channel, packet);
+      if (queued + pcmPacketSize(output.length, channels) <= budget) {
+        const submitted = trySendBinary(channel, pcmPacket(output, channels));
         if (diagnostics) {
           if (submitted === null) {
             stats.sendErrors++;
@@ -329,7 +319,7 @@ export async function makeStreamer(inputFormat, {
         if (!channel?.isOpen()) continue;
         spectrumFrame ??= spectrum?.frame(performance.now());
         if (!spectrumFrame) break;
-        if (channel.bufferedAmount() < spectrumFrame.length * 2) send(channel, spectrumFrame);
+        if (channel.bufferedAmount() < spectrumFrame.length * 2) trySendBinary(channel, spectrumFrame);
       }
       if (diagnostics) {
         const elapsed = performance.now() - started;

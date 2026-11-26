@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { makeDiscordNotifier } from '../src/remote/discord.mjs';
+import { makeDiscordNotifier } from '../src/integrations/discord.mjs';
 
 const webhook = 'https://discord.example/api/webhooks/123/test-token?thread_id=456';
 const link = new URL('https://sdr.example/?connect=abcde');

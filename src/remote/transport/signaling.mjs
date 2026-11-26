@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { pack, unpack } from 'peerjs-js-binarypack';
+import { trySendBinary } from './channel.mjs';
 
 // The browser opens one PeerJS data connection for each logical stream.
 const LABELS = new Set(['cmd', 'fft', 'audio']);
@@ -116,7 +117,7 @@ export function openSignaling({ site, backend, headers, code, token, iceServers,
       const channel = client.channels.get('cmd');
       if (!channel?.isOpen() || channel.bufferedAmount() > MAX_SIGNAL) return;
       const bytes = pack(message);
-      if (bytes instanceof ArrayBuffer) channel.sendMessageBinary(Buffer.from(bytes));
+      if (bytes instanceof ArrayBuffer) trySendBinary(channel, Buffer.from(bytes));
     };
     clients.set(id, client);
     return client;

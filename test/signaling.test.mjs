@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { loadIceServers, signalingAddress } from '../src/remote/signaling.mjs';
+import { loadIceServers, signalingAddress } from '../src/remote/transport/signaling.mjs';
 
 test('the local site signals through its own PeerServer', () => {
   const site = new URL('https://sdr.internal/');

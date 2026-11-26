@@ -1,135 +1,60 @@
 # BrowSDR Runner
 
-A Node.js CLI for sharing an SDR continuously from Linux. It starts USB capture through `rtl_tcp` or `hackrf_transfer`, registers with BrowSDR's PeerServer over WSS, and sends a waterfall and either IQ or PCM audio over WebRTC DataChannels. It uses BrowSDR's WASM DSP for per-VFO band extraction, FM demodulation, and FFT processing. Depending on the client's selected mode, demodulation runs on the host or in the receiving browser.
+Share an RTL-SDR or HackRF from a Linux machine. The runner captures samples, registers a share code, and streams a waterfall and either audio or IQ to a BrowSDR browser client over WebRTC.
 
-## Getting started
+## Quick start
 
-You need Node.js 24 or later, the tools for your SDR, and a BrowSDR deployment. The selected site's backend must serve `api/turn` below its base URL. The LAN docker build on `sdr/` folder runs its PeerServer at `signal/peerjs` below that base; the official site uses PeerJS Cloud at `0.peerjs.com/peerjs`. The `sdr/` Docker build pins a current BrowSDR `main` commit with Remote IQ support. Keep a BrowSDR checkout in the runner repository's `BrowSDR/` directory, or use `--dsp-dir` to point to a verified WASM bundle.
-
-On Debian and Ubuntu, `rtl_tcp` is included in the `rtl-sdr` package. The runner starts it itself on the loopback address `127.0.0.1`, so you do not need a separate service or an exposed port.
+Install Node.js 24 or later and the capture tool for your device. For RTL-SDR on Debian or Ubuntu, run these commands from the runner checkout:
 
 ```bash
 sudo apt install rtl-sdr
-cd /path/to/browsdr-runner
-npm ci
+git submodule update --init --recursive
+npm ci --include=optional
 npm start
 ```
 
-If you have multiple SDRs of the same type, select one with `--serial`. For RTL-SDR, this option accepts a serial number or device index.
+The runner starts `rtl_tcp` on loopback. For HackRF, install `hackrf` from package manager and run `npm start -- --device hackrf`. Use `--serial` to select a device if you have more than one. For RTL-SDR it accepts a serial number or device index.
 
 ```bash
 npm start -- --serial 00000001 --frequency 99900000 --sample-rate 2048000
+npm start -- --help
 ```
 
-To use a HackRF, install `hackrf_transfer` and select the device type:
+When capture and signaling are ready, the runner prints a share code and link. Open the link, unmute the VFO you want to hear, and select a mode under **Source → Decode on**.
 
-```bash
-npm start -- --device hackrf
-```
+## Listening and tuning
 
-Once capture and signaling registration are ready, the CLI prints the share code and URL to standard output. Open the link in BrowSDR, unmute the VFO you want to hear, and select a mode under **Source → Decode on**.
-
-Share codes are 20 lowercase hexadecimal characters generated from 80 random bits. When upgrading from a version with shorter codes, the runner replaces its saved share identity on the next start. Old links stop working; use the new URL printed by the CLI or sent through the Discord webhook. Keep the link private, since anyone with the code can connect.
-
-- **Host (audio)** demodulates WFM (including stereo), NFM, AM, USB/LSB/DSB, CW, and RAW on the runner, then mixes audio from multiple VFOs into 48 kHz PCM. Volume, solo, mute, and squelch settings apply.
-- **This device (IQ)** sends IQ for demodulation in the receiving browser. Select this mode for digital decoders such as HD Radio, DSD, or RDS.
-
-For narrow VFOs, the host demodulates at a lower IF sample rate. In IQ mode, the transmit filter leaves some headroom, and the client filters to its requested bandwidth. A VFO pauses when its bandwidth is below 50 Hz. Host WFM demodulates in mono below 106 kHz.
-
-By default, clients can change the shared center frequency, sample rate, and exposed gains. RTL-SDR applies these settings while keeping the device open. When clients send repeated requests, the runner applies only the latest value for each setting at 200 ms intervals. A gain change keeps IQ transmission running. After a center frequency or sample rate change, the runner briefly discards samples to reduce mixing of IQ from the old setting. Available gain steps depend on the tuner. Because `rtl_tcp` has no command acknowledgement, the values shown in the UI reflect settings processed by the runner. Changing shared HackRF settings reopens capture. Use `--keep-locks` to lock shared settings.
-
-The default site is `https://browsdr.jlynx.net/`. To use the personal site instead, run `npm start -- --url https://sdr.internal/`. Select one site per runner invocation. A site mounted at `/sdr/` can be selected with `--url https://sdr.internal/sdr/`; its default backend paths become `/sdr/api/turn` and `/sdr/signal/peerjs`. If the frontend was built with `VITE_BACKEND_URL=/`, also pass `--backend-url https://sdr.internal/`. `npm start` enables Node's system CA support. Install your server's internal CA into the Linux host trust store, or set `NODE_EXTRA_CA_CERTS=/path/to/internal-root.pem` in the runner's environment. If Caddy requires authentication, set `BROWSDR_AUTHORIZATION` or `BROWSDR_COOKIE` to the complete header value and set `BROWSDR_AUTH_ORIGIN` to the backend's HTTPS origin. Proxy credentials are never sent to PeerJS Cloud.
-
-## Checking latency
-
-The spectrum and waterfall use the same 65,536-point FFT and time averaging as the browser host. The runner selects the maximum of each group of 32 adjacent bins and sends 2,048 display bins. This reduces large jumps in the line caused by brief noise changes.
-
-```bash
-npm start -- --stats
-```
-
-The runner prints these metrics every 10 seconds:
-
-| Metric | Meaning |
+| Decode on | What the runner sends |
 | --- | --- |
-| `capture gap max` | Longest interval between IQ deliveries to the runner. This includes USB transfer, the capture tool's block size, and OS scheduling. |
-| `DSP/send work` | Time spent on DSP and packet sending over 10 seconds, plus the longest time spent processing one IQ callback. |
-| `IQ queue max` | Estimated queue duration, calculated from buffered bytes on the DataChannel and the total send rate of active IQ streams. |
-| `blocked blocks`, `discarded IQ values` | Blocks skipped because the send queue was full, and leftover I/Q values that were not turned into packets. |
-| `slice runs` | Actual slice extraction runs and subscription processing counts. Slices with the same frequency, width, and rate are computed once per capture block. |
-| `accepted PCM packets`, `PCM queue max`, `discarded PCM frames` | Host audio accepted by the native channel, estimated duration of its queue, and audio frames skipped before transport. |
-| `packets queued by native channel`, `native send errors` | IQ or PCM sends that the library queued for later, and sends that threw an error. |
+| **Host (audio)** | 48 kHz PCM mixed from active VFOs. Supports WFM, NFM, AM, USB, LSB, DSB, CW, and RAW. Volume, solo, mute, and squelch apply. |
+| **This device (IQ)** | An IQ slice for each active VFO. The browser demodulates the signal and can run digital decoders such as HD Radio, DSD, and RDS. |
 
-Osmocom's default `rtl_tcp` uses 256 KiB USB blocks. Filling one block takes about 41 ms at 3.2 MSPS, 64 ms at 2.048 MSPS, or 524 ms at 250 kSPS. With HackRF, the interval depends on when `hackrf_transfer` produces data. The default IQ send queue target is 80 ms. You can adjust it with an option such as `--iq-queue-ms 60`. A lower target limits the buildup of old samples but skips samples more often during short transmission stalls. The runner also enforces enough capacity for two packets and an upper byte limit. [Osmocom capture block settings](https://github.com/osmocom/rtl-sdr/blob/master/src/rtl_tcp.c) · [librtlsdr default block size](https://github.com/osmocom/rtl-sdr/blob/master/src/librtlsdr.c)
+A VFO pauses below 50 Hz bandwidth. In host mode, narrow VFOs use a lower IF sample rate and WFM below 106 kHz plays in mono. In IQ mode, the slice leaves room for the browser's channel filter.
 
-For **Host (audio)**, rising `discarded PCM frames` alongside a full send queue means the runner drops audio before it reaches the browser. The default PCM send limit is 80 ms. Try `--pcm-queue-ms 200` if short stalls fill the queue. The option accepts 40 to 5000 ms, so you can compare a longer queue during a WAN test. A queue absorbs brief stalls and can increase latency. If the queue stays near the limit and drops continue, the connection is falling behind in sustained use. Mono PCM uses about 1.54 Mbps and stereo uses about 3.07 Mbps per listener, before protocol overhead and the waterfall.
+Clients can change the shared center frequency, sample rate, and gains. Pass `--keep-locks` to lock those controls. For RTL-SDR, the runner applies the most recent requests at 200 ms intervals while keeping the device open. It briefly discards samples after a retune or sample rate change. Gain steps depend on the tuner, and the UI shows the settings applied by the runner because `rtl_tcp` has no command acknowledgement. HackRF reopens capture after a shared RF setting changes.
 
-`--stats` also shows the selected path, RTT, and SCTP input rate of each client's audio connection. A `relay` candidate on either side means the audio flows through TURN. SCTP input measures bytes accepted into the protocol stack, so it can run ahead of what the browser receives. Compare these numbers with the browser's **Playback buffer**, **Playback gaps**, and **Max arrival gaps**.
+## Choose a BrowSDR site
 
-For a slow remote path, use `--waterfall-fps 5` to reduce the spectrum and waterfall data sent by the runner. This lowers the maximum FFT payload from about 331 kbps to 83 kbps per listener. Try `--waterfall-fps 0` to isolate audio with the display stream disabled. Tuning and audio still work, and the official site needs no update for this option. This helps if the streams are competing for available bandwidth.
-
-### WebRTC engine and high latency connections
-
-The default `--webrtc auto` selects libwebrtc at startup and uses libdatachannel if the optional libwebrtc binary cannot load. The startup log shows which engine was selected. Both engines use the same share link. [libwebrtc binding](https://github.com/WonderInventions/node-webrtc) · [libdatachannel platform support](https://github.com/murat-dogan/node-datachannel#supported-platforms)
-
-On a tested TURN relay path at about 455 ms RTT, switching to libwebrtc restored stable **Host (audio)** playback after startup. The runner reported about 1.55 Mbps of mono PCM output, with no queued or discarded PCM in the measured interval. If you want to require libwebrtc for a high latency connection, install the optional binary and select it explicitly.
+The default is the official [browsdr.jlynx.net](https://browsdr.jlynx.net/). Use `--url` to select one site per runner. If a self-hosted frontend and its backend use different paths, also pass `--backend-url`.
 
 ```bash
-npm ci --include=optional
-npm start -- --webrtc libwebrtc --stats
+npm start -- --url https://sdr.internal/
+npm start -- --url https://sdr.internal/sdr/ --backend-url https://sdr.internal/
 ```
 
-The install command includes the optional `@roamhq/wrtc` package. Keep any existing site, sample rate, and state directory options. The test run also used `--iq-queue-ms 250`, which applies only to **This device (IQ)**.
+The runner loads ICE servers from `api/turn` under the backend base URL. The self-hosted container uses `signal/peerjs` under that same base. The official site uses PeerJS Cloud for signaling.
 
-To compare engines or force the fallback, run the same command with `--webrtc libdatachannel`. Stop one runner before starting the other, then reuse the same share link, browser, station, and decoding mode. Check that the selected ICE paths are comparable. Watch playback and the `discarded PCM frames` counter after the first minute. The libdatachannel log reports SCTP input and SCTP RTT. The libwebrtc log reports DataChannel output and ICE RTT.
+For an internal HTTPS site, install the CA in the host's trust store or set `NODE_EXTRA_CA_CERTS` to the CA certificate path. The `npm start` command enables Node's system CA support.
 
-## Upstream compatibility
+If the backend requires proxy authentication, set `BROWSDR_AUTH_ORIGIN` to its HTTPS origin and provide the complete `BROWSDR_AUTHORIZATION` or `BROWSDR_COOKIE` header value. The runner scopes these headers to the authorized backend and its signaling endpoint on that origin.
 
-The runner uses PeerJS `cmd` / `fft` / `audio` channels, BrowSDR Remote IQ v1, and the existing PCM packet format. It sends host PCM to clients that configure a VFO without requesting IQ. The upstream `main` commit `255ceef490d90733a26baa6c0fde9c2b7d3fb0ef`, checked on 2026-11-26, includes Remote IQ and subdirectory hosting. The Docker build pins that commit by default; change `BROWSDR_REF` only after checking the build patch and both decoding modes. [Checked main commit](https://github.com/jLynx/BrowSDR/tree/255ceef490d90733a26baa6c0fde9c2b7d3fb0ef)
+## Run as a service
 
-### Self-hosted frontend container
+The runner retries signaling registration with a delay of 1 to 30 seconds and restarts capture if the SDR tool exits. Keep the state directory to reuse the same share code across restarts. It defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/browsdr-runner/`. Use a separate `--state-dir` for each runner that shares an SDR of the same type on the same site.
 
-Build the files in `sdr/` with the same `build.context: ./sdr/` used by the existing Compose setup. The image serves BrowSDR, PeerServer, `/api/turn`, and `/api/geo` through HTTP port 8080; Let web servers handle HTTPS. The image still needs your separate coturn service. Set `TURN_LAN_IP` to the address reachable by clients and use the same `TURN_PASSWORD` as coturn.
+Share codes use 20 lowercase hexadecimal characters. After upgrading from a version with shorter codes, use the newly printed link. Anyone with a valid share code and access to the site can connect.
 
-```yaml
-sdr:
-  build:
-    context: ./sdr/
-    args:
-      BROWSDR_REF: 255ceef490d90733a26baa6c0fde9c2b7d3fb0ef
-      VITE_BASE_PATH: /                 # Set /sdr/ if web server exposes the app there
-      VITE_BACKEND_URL: ''              # Set / if the APIs stay at the domain root
-  environment:
-    TURN_LAN_IP: ${TURN_LAN_IP}
-    TURN_PASSWORD: ${TURN_PASSWORD:?Set TURN_PASSWORD in .env}
-```
-
-The build defaults to serving everything at `/`. For `/sdr/`, set `VITE_BASE_PATH=/sdr/` and route both `/sdr` and `/sdr/*` through Caddy to port 8080. The backend follows that base unless `VITE_BACKEND_URL` selects another path. Set `--url` to the matching frontend URL and, when overriding the backend path, set `--backend-url` to its full HTTPS base URL. `VITE_BASE_PATH` and `VITE_BACKEND_URL` are build settings, so rebuild after changing them. This container supports a same-origin backend path; an absolute cross-origin backend needs a separate server and CORS configuration. The build patch fails if the pinned BrowSDR source no longer matches its expected signaling or ICE handling code.
-
-If your Compose file still passes `BROWSDR_REF: ${BROWSDR_REF}`, update that `.env` value to the commit above or remove the override; otherwise it will keep building the older branch. This container does not provide the optional `/hf-proxy/` transcription model endpoint.
-
-By default, the WASM bundle is loaded from `BrowSDR/wasm/dsp/pkg/` in the runner repository. If you pin a separate bundle, point `--dsp-dir` to a directory containing `browsdr_dsp.js`, `browsdr_dsp_bg.wasm`, and `package.json` from the same build.
-
-```bash
-npm start -- --dsp-dir /opt/browsdr-dsp/known-good --stats
-BROWSDR_DSP_DIR=/opt/browsdr-dsp/known-good npm test
-```
-
-`npm test` checks the runner's capture, WASM demodulation, packet formats, and Discord notification. When you replace the client build, use a test share link to check audio, waterfall, and tuning in both decoding modes.
-
-## Code layout
-
-- `runner.mjs` handles CLI options and the capture and sharing service lifecycle.
-- `src/capture/` handles device settings and RTL-SDR or HackRF capture.
-- `src/dsp/` loads BrowSDR WASM and processes IQ, audio, and spectrum data.
-- `src/remote/` handles the saved share identity, PeerServer, WebRTC packets, and Discord notifications.
-- `test/` contains the runner tests.
-
-## Running continuously
-
-If signaling disconnects, the runner retries registration after 1 to 30 seconds. Clients can reopen the same link after their WebRTC sessions disconnect. If the SDR is removed or capture exits, the runner also restarts the SDR tool. By default, the share ID and registration token are stored in `${XDG_STATE_HOME:-$HOME/.local/state}/browsdr-runner/`. Use a separate `--state-dir` for another service or SDR when needed.
-
-Here is a systemd example. Adjust `User`, the Node path, and the checkout path for your machine.
+Save this example as `/etc/systemd/system/browsdr-runner.service` and adjust the service user, Node binary path, and checkout path. Add `--url` to `ExecStart` to select a self-hosted site.
 
 ```ini
 [Unit]
@@ -141,7 +66,7 @@ After=network-online.target
 User=sdr
 WorkingDirectory=/opt/browsdr-runner
 StateDirectory=browsdr-runner
-ExecStart=/usr/bin/node --use-system-ca /opt/browsdr-runner/runner.mjs --url https://browsdr.jlynx.net/ --state-dir /var/lib/browsdr-runner
+ExecStart=/usr/bin/node --use-system-ca /opt/browsdr-runner/runner.mjs --state-dir /var/lib/browsdr-runner
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=-/etc/browsdr-runner.env
@@ -149,10 +74,6 @@ EnvironmentFile=-/etc/browsdr-runner.env
 [Install]
 WantedBy=multi-user.target
 ```
-
-For the personal/internal server, replace the `--url` in `ExecStart` with `https://sdr.internal/`. Run one runner per SDR; the selected site determines where clients can find its share code.
-
-If you save the example as `/etc/systemd/system/browsdr-runner.service`, start it and check the share code with:
 
 ```bash
 sudo systemctl daemon-reload
@@ -162,16 +83,81 @@ journalctl -u browsdr-runner -f
 
 ### Discord startup notification
 
-Set `BROWSDR_DISCORD_WEBHOOK_URL` to a webhook URL copied from your Discord channel. Once SDR capture and signaling registration are ready, the runner posts the `?connect=…` link once per process run. A failed notification is logged, and capture continues.
-
-For systemd, save the real URL in `/etc/browsdr-runner.env` with `0600` permissions:
+Set `BROWSDR_DISCORD_WEBHOOK_URL` to your Discord webhook URL. The runner posts the share link once per process when capture and signaling are ready. For systemd, put the value in `/etc/browsdr-runner.env`, set file permissions to `0600`, and restart the service.
 
 ```ini
 BROWSDR_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
 ```
 
-The service unit above already includes the optional `EnvironmentFile=-/etc/browsdr-runner.env`. After creating the file, run `sudo systemctl restart browsdr-runner`.
+## Troubleshooting
 
-If RTL-SDR cannot be opened, check that the service account can access the USB device and that `dvb_usb_rtl28xxu` or another SDR program is not holding it. When the device is free, run `rtl_test -t` as the same account to distinguish driver and permission problems. [Debian RTL-SDR permission and driver notes](https://github.com/osmocom/rtl-sdr/blob/master/debian/README.Debian)
+### Audio cuts out on a high latency connection
 
-If the kernel reports a `device descriptor read` error and the device disappears, check USB status with `sudo journalctl -k -f` and `lsusb -t`. Try another port or a hub with stable power. The runner reconnects when the device reappears. If a physical reconnect must be done remotely, a hub with per-port power control can cycle power to only the SDR's port. [Linux USB error codes](https://docs.kernel.org/driver-api/usb/error-codes.html) · [uhubctl supported hubs and usage](https://github.com/mvp/uhubctl)
+Check the startup log for `WebRTC engine: libwebrtc.` The default, `--webrtc auto`, prefers libwebrtc and falls back to libdatachannel if the optional binary cannot load. To require libwebrtc and log transport statistics, run:
+
+```bash
+npm ci --include=optional
+npm start -- --webrtc libwebrtc --stats
+```
+
+Keep your usual site, sample rate, and state directory options. On one TURN relay path at about 455 ms RTT, libwebrtc restored stable **Host (audio)** playback after startup, with about 1.55 Mbps of mono PCM output and zero runner PCM drops during the measured interval. That run used `--iq-queue-ms 250` for **This device (IQ)**. You can force `--webrtc libdatachannel` for comparison. [libwebrtc binding](https://github.com/WonderInventions/node-webrtc) · [libdatachannel platform support](https://github.com/murat-dogan/node-datachannel#supported-platforms)
+
+Use `--stats` to distinguish capture stalls from send congestion. It reports every 10 seconds.
+
+| What to check | How to read it |
+| --- | --- |
+| `capture gap max`, `DSP/send work` | Capture stalls and time spent processing samples. Stock `rtl_tcp` uses 256 KiB USB blocks, which take about 64 ms to fill at 2.048 MSPS. |
+| `PCM queue max`, `discarded PCM frames` | A queue near its limit and rising drops indicate that host audio is backing up. `--pcm-queue-ms 200` can absorb brief stalls. A queue that stays full indicates the connection is falling behind. |
+| `IQ queue max`, `blocked blocks`, `discarded IQ values` | Congestion when sending IQ. `--iq-queue-ms` controls its queue independently of PCM. |
+| `Audio transport` | A `relay` candidate means the audio uses TURN. Compare the selected route, RTT, and the browser's playback gaps. Both the SCTP input and DataChannel output counters report the sender's view. |
+
+Mono PCM needs about 1.54 Mbps per listener, and stereo needs about 3.07 Mbps, before protocol overhead and the waterfall. Try `--waterfall-fps 5` to reduce display traffic or `--waterfall-fps 0` to isolate audio while troubleshooting.
+
+### RTL-SDR cannot be opened
+
+Check USB permissions for the service user and whether a kernel driver or another SDR program has claimed the device. With the device free, run `rtl_test -t` as the service user. If the device disappears, check `sudo journalctl -k -f` and `lsusb -t`. The runner retries capture when the device returns. [RTL-SDR permissions and driver notes](https://github.com/osmocom/rtl-sdr/blob/master/debian/README.Debian)
+
+## Self-host BrowSDR
+
+The [Docker build](sdr/Dockerfile) serves the BrowSDR web app and PeerServer on port 8080. Run the SDR runner separately on the machine with the device. Use an HTTPS reverse proxy for the app and run coturn separately with the username `browsdr` and the same `TURN_PASSWORD`. Set `TURN_LAN_IP` to the TURN IPv4 address reachable by both runner and browser.
+
+```yaml
+services:
+  sdr:
+    build:
+      context: ./sdr
+      args:
+        VITE_BASE_PATH: /
+        VITE_BACKEND_URL: ""
+    environment:
+      TURN_LAN_IP: ${TURN_LAN_IP}
+      TURN_PASSWORD: ${TURN_PASSWORD:?Set TURN_PASSWORD in .env}
+```
+
+If your proxy is another Compose service, put it on the same Docker network and point it at `sdr:8080`. For a proxy running on the host, publish `127.0.0.1:8080:8080`.
+
+To serve at `/sdr/`, set `VITE_BASE_PATH: /sdr/`, proxy both `/sdr` and `/sdr/*` with the path intact, and use `--url https://sdr.internal/sdr/`. Leave `VITE_BACKEND_URL` empty to keep the APIs below `/sdr/`. If you set it to `/`, also proxy `/api/turn`, `/api/geo`, and `/signal/*` at the root and pass `--backend-url https://sdr.internal/` to the runner. Rebuild the image after changing either build argument. The container omits the optional `/hf-proxy/` transcription endpoint.
+
+## Development
+
+The runner uses the PeerJS `cmd`, `fft`, and `audio` channels, BrowSDR Remote IQ v1, and the existing PCM format. The submodule and Docker build pin [BrowSDR commit `255ceef`](https://github.com/jLynx/BrowSDR/tree/255ceef490d90733a26baa6c0fde9c2b7d3fb0ef). A Compose build argument named `BROWSDR_REF` overrides the Docker default. When updating that ref, check the [build patch](sdr/patch.mjs), audio, waterfall, and tuning in both decoding modes.
+
+By default the runner loads its WASM bundle from `BrowSDR/wasm/dsp/pkg/`. To use a separate build, point `--dsp-dir` to a directory containing `browsdr_dsp.js`, `browsdr_dsp_bg.wasm`, and `package.json` from that build.
+
+```bash
+npm test
+BROWSDR_DSP_DIR=/opt/browsdr-dsp/known-good npm test
+```
+
+### Code layout
+
+| Path | Responsibility |
+| --- | --- |
+| `runner.mjs` | Capture and sharing lifecycle |
+| `src/cli.mjs` | CLI options and environment settings |
+| `src/capture/` | RTL-SDR and HackRF capture and controls |
+| `src/dsp/` | WASM, IQ slices, audio, and waterfall |
+| `src/remote/` | Share identity and packet formats |
+| `src/remote/transport/` | PeerServer signaling and WebRTC |
+| `src/integrations/` | External integrations |
+| `test/` | Runner tests |

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { cleanup, PeerConnection } from 'node-datachannel';
-import { loadPeerFactory } from '../src/remote/peer-engine.mjs';
-import { describeAudioTransport } from '../src/remote/signaling.mjs';
+import { loadPeerFactory } from '../src/remote/transport/peer-engine.mjs';
+import { describeAudioTransport } from '../src/remote/transport/signaling.mjs';
 import { iqPacket, pcmPacket } from '../src/remote/protocol.mjs';
 
 test('the libwebrtc answerer exchanges commands, PCM and IQ with a WebRTC client', { timeout: 10000 }, async (t) => {
