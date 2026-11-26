@@ -1,0 +1,3 @@
+[submodule "BrowSDR"]
+	path = BrowSDR
+	url = https://github.com/jLynx/BrowSDR.git
