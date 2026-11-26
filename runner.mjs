@@ -7,13 +7,15 @@ import { parseArgs } from 'node:util';
 import { devices } from './src/capture/devices.mjs';
 import { RtlTcpCapture } from './src/capture/rtl-tcp.mjs';
 import { Capture } from './src/capture/subprocess.mjs';
-import { DEFAULT_IQ_QUEUE_MS, makeStreamer } from './src/dsp/stream.mjs';
+import { DEFAULT_WATERFALL_FPS } from './src/dsp/spectrum.mjs';
+import { DEFAULT_IQ_QUEUE_MS, DEFAULT_PCM_QUEUE_MS, makeStreamer } from './src/dsp/stream.mjs';
 import { makeDiscordNotifier } from './src/remote/discord.mjs';
 import { loadIdentity, saveIdentity } from './src/remote/identity.mjs';
 import { FFT_SIZE, RECEIVER_ID } from './src/remote/protocol.mjs';
-import { loadIceServers, openSignaling } from './src/remote/signaling.mjs';
+import { describeAudioTransport, loadIceServers, openSignaling } from './src/remote/signaling.mjs';
 
 const DEFAULT_URL = 'https://browsdr.jlynx.net/';
+const MAX_PCM_QUEUE_MS = 5000;
 
 const help = `Usage: node runner.mjs [options]
   --url URL             BrowSDR HTTPS site (default: ${DEFAULT_URL})
@@ -25,7 +27,9 @@ const help = `Usage: node runner.mjs [options]
   --state-dir DIR       Persistent share identity directory
   --dsp-dir DIR         Use a specific BrowSDR WASM bundle directory
   --iq-queue-ms MS      Target native IQ send queue (default: ${DEFAULT_IQ_QUEUE_MS})
-  --stats               Print capture, DSP and queue statistics every 10 seconds
+  --pcm-queue-ms MS     Host audio send queue limit, 40–${MAX_PCM_QUEUE_MS} ms (default: ${DEFAULT_PCM_QUEUE_MS})
+  --waterfall-fps FPS   Remote spectrum and waterfall rate, 0 to disable (default: ${DEFAULT_WATERFALL_FPS})
+  --stats               Print capture, DSP, queue and audio transport stats every 10 seconds
   --keep-locks          Keep shared RF controls locked
   --relay-only          Use TURN relay candidates on the native host
   --help                Display usage
@@ -46,6 +50,8 @@ function parseOptions() {
     'state-dir': { type: 'string' },
     'dsp-dir': { type: 'string' },
     'iq-queue-ms': { type: 'string' },
+    'pcm-queue-ms': { type: 'string' },
+    'waterfall-fps': { type: 'string' },
     stats: { type: 'boolean' },
     'keep-locks': { type: 'boolean' },
     'relay-only': { type: 'boolean' },
@@ -75,6 +81,14 @@ function parseOptions() {
   if (!Number.isInteger(queueMs) || queueMs < 40 || queueMs > 250) {
     throw new Error('--iq-queue-ms must be an integer from 40 to 250.');
   }
+  const pcmQueueMs = Number(values['pcm-queue-ms'] ?? DEFAULT_PCM_QUEUE_MS);
+  if (!Number.isInteger(pcmQueueMs) || pcmQueueMs < 40 || pcmQueueMs > MAX_PCM_QUEUE_MS) {
+    throw new Error(`--pcm-queue-ms must be an integer from 40 to ${MAX_PCM_QUEUE_MS}.`);
+  }
+  const waterfallFps = Number(values['waterfall-fps'] ?? DEFAULT_WATERFALL_FPS);
+  if (values['waterfall-fps'] === '' || !Number.isInteger(waterfallFps) || waterfallFps < 0 || waterfallFps > DEFAULT_WATERFALL_FPS) {
+    throw new Error(`--waterfall-fps must be an integer from 0 to ${DEFAULT_WATERFALL_FPS}.`);
+  }
   const dspDir = values['dsp-dir'] === undefined ? undefined : resolve(values['dsp-dir']);
   const stateDir = resolve(values['state-dir'] ?? join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'browsdr-runner'));
   const authSite = new URL(process.env.BROWSDR_AUTH_ORIGIN || DEFAULT_URL);
@@ -88,7 +102,7 @@ function parseOptions() {
     if (process.env.BROWSDR_COOKIE) headers.Cookie = process.env.BROWSDR_COOKIE;
   }
   return {
-    site, backend, device, serial: values.serial, frequency, sampleRate, stateDir, headers, dspDir, queueMs,
+    site, backend, device, serial: values.serial, frequency, sampleRate, stateDir, headers, dspDir, queueMs, pcmQueueMs, waterfallFps,
     diagnostics: !!values.stats,
     locked: !!values['keep-locks'], relayOnly: !!values['relay-only'],
   };
@@ -123,10 +137,15 @@ async function main() {
     log(`Stats (10s): clients=${stats.clients}, IQ slices=${stats.slices}, capture callbacks=${stats.callbacks}, `
       + `capture gap max=${stats.maxArrivalGapMs.toFixed(1)}ms, DSP/send work=${stats.processingMs.toFixed(0)}ms `
       + `(callback max ${stats.maxProcessingMs.toFixed(1)}ms), IQ queue max≈${stats.maxQueueMs.toFixed(1)}ms, `
-      + `blocked blocks=${stats.blockedBlocks}, discarded IQ values=${stats.discardedValues}, sent packets=${stats.sentPackets}, `
+      + `blocked blocks=${stats.blockedBlocks}, discarded IQ values=${stats.discardedValues}, accepted IQ packets=${stats.sentPackets}, `
       + `slice runs=${stats.sliceRuns}/${stats.subscriberBlocks} subscriptions, `
-      + `PCM packets=${stats.pcmPackets}, PCM queue max≈${stats.maxPcmQueueMs.toFixed(1)}ms, `
-      + `discarded PCM frames=${stats.discardedPcmFrames}.`);
+      + `accepted PCM packets=${stats.pcmPackets}, PCM queue max≈${stats.maxPcmQueueMs.toFixed(1)}ms (limit ${options.pcmQueueMs}ms), `
+      + `discarded PCM frames=${stats.discardedPcmFrames}, packets queued by native channel=${stats.nativeQueuedPackets}, `
+      + `native send errors=${stats.sendErrors}.`);
+    if (clients.size) {
+      const paths = Array.from(clients, (client) => `${client.iq ? 'IQ' : 'PCM'} ${describeAudioTransport(client)}`);
+      log(`Audio transport (per client): ${paths.join(' | ')}`);
+    }
   }, 10000) : undefined;
   let receiving = false;
   let registeredCode;

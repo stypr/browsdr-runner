@@ -4,9 +4,11 @@ import { FFT_SIZE, fftPacket } from '../remote/protocol.mjs';
 const ANALYSIS_SIZE = 65536;
 const IQ_BYTES = ANALYSIS_SIZE * 2;
 const BINS_PER_OUTPUT_BIN = ANALYSIS_SIZE / FFT_SIZE;
-const FRAME_INTERVAL_MS = 50;
+export const DEFAULT_WATERFALL_FPS = 20;
+const SMOOTHING_INTERVAL_MS = 1000 / DEFAULT_WATERFALL_FPS;
 
-export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }) {
+export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }, fps = DEFAULT_WATERFALL_FPS) {
+  const frameIntervalMs = 1000 / fps;
   const window = Float32Array.from({ length: ANALYSIS_SIZE }, (_, i) => {
     const phase = 2 * Math.PI * i / ANALYSIS_SIZE;
     return 0.355768 - 0.487396 * Math.cos(phase) + 0.144232 * Math.cos(2 * phase) - 0.012604 * Math.cos(3 * phase);
@@ -35,7 +37,7 @@ export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }) {
       filled = Math.min(IQ_BYTES, filled + samples.length);
     },
     frame(now) {
-      if (filled < IQ_BYTES || (lastFrame !== undefined && now - lastFrame < FRAME_INTERVAL_MS)) return null;
+      if (filled < IQ_BYTES || (lastFrame !== undefined && now - lastFrame < frameIntervalMs)) return null;
 
       const view = new Uint8Array(memory.buffer, input, IQ_BYTES);
       view.set(ring.subarray(position));
@@ -43,7 +45,7 @@ export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }) {
       const ptr = fft.fft_ptr(input, IQ_BYTES);
       const power = new Float32Array(memory.buffer, ptr, ANALYSIS_SIZE);
       // Start with real measurements, including after a retune, then use the browser's time constant.
-      const alpha = lastFrame === undefined ? 1 : 1 - 0.4 ** ((now - lastFrame) / FRAME_INTERVAL_MS);
+      const alpha = lastFrame === undefined ? 1 : 1 - 0.4 ** ((now - lastFrame) / SMOOTHING_INTERVAL_MS);
       lastFrame = now;
       for (let i = 0; i < FFT_SIZE; i++) {
         let peak = -Infinity;

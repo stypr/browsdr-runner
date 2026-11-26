@@ -39,6 +39,29 @@ test('IQ and FFT packets retain the BrowSDR wire format', () => {
     '425344520a006e61746976652d736472ffda0300000041');
 });
 
+test('lowering or disabling the waterfall leaves host audio running', async (t) => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const raw = Buffer.alloc(131072, 125);
+  const radio = { centerFreq: 100, sampleRate: 2400000 };
+  for (const [waterfallFps, expectedFftFrames] of [[5, 2], [0, 0]]) {
+    const streamer = await makeStreamer('uint8', { dspDir: process.env.BROWSDR_DSP_DIR, waterfallFps });
+    try {
+      const { client, audio, fft } = addClient(streamer, 1);
+      streamer.config(client, { type: 'clientStream', stream: 'audio' });
+      for (const time of [0, 50, 199, 200]) {
+        now = time;
+        streamer.samples(raw, radio);
+      }
+      assert.equal(fft.packets.length, expectedFftFrames);
+      assert(audio.packets.length > 0);
+      assert.notEqual(audio.packets[0].toString('ascii', 16, 20), 'BSIQ');
+    } finally {
+      streamer.close();
+    }
+  }
+});
+
 test('identical slices share DSP while congestion is isolated to the slow subscriber', async () => {
   const streamer = await makeStreamer('uint8', { dspDir: process.env.BROWSDR_DSP_DIR, diagnostics: true });
   try {

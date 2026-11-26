@@ -6,6 +6,7 @@ import { pack, unpack } from 'peerjs-js-binarypack';
 const LABELS = new Set(['cmd', 'fft', 'audio']);
 const MAX_SIGNAL = 65536;
 const MAX_CLIENTS = 8;
+const audioRateSamples = new WeakMap();
 
 export function signalingAddress(site, backend, code, token) {
   // The official BrowSDR frontend uses PeerJS Cloud; the LAN build uses its own PeerServer.
@@ -43,6 +44,28 @@ export async function loadIceServers(backend, headers, signal) {
     }
   }
   return servers;
+}
+
+export function describeAudioTransport(client, now = performance.now()) {
+  const audio = [...client.connections.values()].find(({ label }) => label === 'audio');
+  if (!audio) return 'path unavailable';
+  try {
+    const { pc } = audio;
+    const pair = pc.getSelectedCandidatePair();
+    if (!pair) return 'path unavailable';
+    const rtt = pc.rtt();
+    const route = `${pair.local.type}/${pair.local.transportType} → ${pair.remote.type}/${pair.remote.transportType}`;
+    const bytes = pc.bytesSent();
+    const previous = audioRateSamples.get(pc);
+    audioRateSamples.set(pc, { bytes, now });
+    const rate = previous && bytes >= previous.bytes && now > previous.now
+      ? `${Math.round(8 * (bytes - previous.bytes) / (now - previous.now))} kbps`
+      : 'unavailable';
+    return `${route}, RTT ${rtt >= 0 ? `${rtt} ms` : 'unavailable'}, SCTP input ${rate}`;
+  } catch {
+    // A closing native connection can stop reporting statistics between polls.
+    return 'path unavailable';
+  }
 }
 
 export function openSignaling({ site, backend, headers, code, token, iceServers, relayOnly, signal, onOpen, onClient, onCommand, onLeave, log }) {

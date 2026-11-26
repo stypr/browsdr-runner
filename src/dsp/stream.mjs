@@ -1,38 +1,41 @@
 import { HostAudioVfo, hostAudioSettings } from './host-audio.mjs';
 import { AUDIO_RATE, IQ_OVERHEAD, MAX_IQ_VALUES, iqPacket, pcmPacket } from '../remote/protocol.mjs';
 import { IF_RATES, planSlice } from './iq-plan.mjs';
-import { makeSpectrum } from './spectrum.mjs';
+import { DEFAULT_WATERFALL_FPS, makeSpectrum } from './spectrum.mjs';
 import { loadDsp } from './wasm.mjs';
 
 const INPUT_CAPACITY = 65536;
 const PCM_PACKET_FRAMES = AUDIO_RATE / 50;
-const PCM_QUEUE_SECONDS = 0.08;
 const MIN_VFO_BANDWIDTH = 50;
 const MAX_VFOS = 8;
 export const DEFAULT_IQ_QUEUE_MS = 80;
+export const DEFAULT_PCM_QUEUE_MS = 80;
 
 function send(channel, packet) {
   // The transport can close between isOpen() and sending on the native channel.
   try {
-    channel.sendMessageBinary(packet);
-    return true;
+    // false means libdatachannel kept the packet for a later send.
+    return channel.sendMessageBinary(packet) !== false;
   } catch {
-    return false;
+    return null;
   }
 }
 
 function emptyStats() {
   return { callbacks: 0, maxArrivalGapMs: 0, processingMs: 0, maxProcessingMs: 0,
     maxQueueMs: 0, discardedValues: 0, blockedBlocks: 0, sentPackets: 0, subscriberBlocks: 0, sliceRuns: 0,
-    maxPcmQueueMs: 0, pcmPackets: 0, discardedPcmFrames: 0 };
+    maxPcmQueueMs: 0, pcmPackets: 0, discardedPcmFrames: 0, nativeQueuedPackets: 0, sendErrors: 0 };
 }
 
 // Share filtered IQ between matching VFOs while keeping playback queues per client.
-export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_QUEUE_MS, diagnostics = false, log = () => {} } = {}) {
+export async function makeStreamer(inputFormat, {
+  dspDir, queueMs = DEFAULT_IQ_QUEUE_MS, pcmQueueMs = DEFAULT_PCM_QUEUE_MS,
+  waterfallFps = DEFAULT_WATERFALL_FPS, diagnostics = false, log = () => {},
+} = {}) {
   const dsp = await loadDsp(dspDir);
   const { memory, DspProcessor, alloc_iq_buffer, free_iq_buffer } = dsp;
   const input = alloc_iq_buffer(INPUT_CAPACITY);
-  const spectrum = makeSpectrum(dsp);
+  const spectrum = waterfallFps > 0 ? makeSpectrum(dsp, waterfallFps) : null;
   const clients = new Set();
   const slices = new Map();
   let block = 0;
@@ -196,8 +199,17 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
           index, revision: vfo.revision, sequence: vfo.sequence, plan: slice.plan, discontinuity: vfo.discontinuity,
         }, samples, slice.scale);
         vfo.sequence = (vfo.sequence + 1) >>> 0;
-        vfo.discontinuity = !send(channel, packet);
-        if (diagnostics && !vfo.discontinuity) stats.sentPackets++;
+        const submitted = send(channel, packet);
+        vfo.discontinuity = submitted === null;
+        if (diagnostics) {
+          if (vfo.discontinuity) {
+            stats.sendErrors++;
+            stats.discardedValues += size;
+          } else {
+            stats.sentPackets++;
+            if (submitted === false) stats.nativeQueuedPackets++;
+          }
+        }
       }
     }
   }
@@ -236,7 +248,8 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
     }
     if (!active.length) return;
 
-    const budget = AUDIO_RATE * channels * 4 * PCM_QUEUE_SECONDS;
+    const bytesPerMs = AUDIO_RATE * channels * 4 / 1000;
+    const budget = bytesPerMs * pcmQueueMs;
     const mix = client.pcmMix ??= new Float32Array(PCM_PACKET_FRAMES * 2);
     while (available > 0) {
       const frames = Math.min(available, PCM_PACKET_FRAMES);
@@ -244,11 +257,22 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
       output.fill(0);
       for (const { audio, gain } of active) audio.mixInto(output, frames, channels, gain);
       const queued = channel.bufferedAmount();
-      if (diagnostics) stats.maxPcmQueueMs = Math.max(stats.maxPcmQueueMs, 1000 * queued / (AUDIO_RATE * channels * 4));
+      if (diagnostics) stats.maxPcmQueueMs = Math.max(stats.maxPcmQueueMs, queued / bytesPerMs);
       const packet = pcmPacket(output, channels);
-      if (queued + packet.length <= budget && send(channel, packet)) {
-        if (diagnostics) stats.pcmPackets++;
-      } else if (diagnostics) stats.discardedPcmFrames += frames;
+      if (queued + packet.length <= budget) {
+        const submitted = send(channel, packet);
+        if (diagnostics) {
+          if (submitted === null) {
+            stats.sendErrors++;
+            stats.discardedPcmFrames += frames;
+          } else {
+            stats.pcmPackets++;
+            if (submitted === false) stats.nativeQueuedPackets++;
+          }
+        }
+      } else if (diagnostics) {
+        stats.discardedPcmFrames += frames;
+      }
       available -= frames;
     }
   }
@@ -261,7 +285,7 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
       // librtlsdr uses offset bytes, while the WASM input expects signed int8 IQ.
       for (let i = 0; i < raw.length; i++) view[i] ^= 0x80;
     }
-    spectrum.append(view);
+    spectrum?.append(view);
 
     for (const client of clients) {
       const channel = client.channels.get('audio');
@@ -273,7 +297,7 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
 
   const remove = (client) => {
     if (clients.delete(client)) clearVfos(client);
-    if (!clients.size) spectrum.reset();
+    if (!clients.size) spectrum?.reset();
   };
   return {
     add(client) {
@@ -285,7 +309,7 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
     config,
     reset() {
       lastArrival = undefined;
-      spectrum.reset();
+      spectrum?.reset();
       for (const client of clients) clearVfos(client);
     },
     samples(raw, radio) {
@@ -303,7 +327,7 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
       for (const client of clients) {
         const channel = client.channels.get('fft');
         if (!channel?.isOpen()) continue;
-        spectrumFrame ??= spectrum.frame(performance.now());
+        spectrumFrame ??= spectrum?.frame(performance.now());
         if (!spectrumFrame) break;
         if (channel.bufferedAmount() < spectrumFrame.length * 2) send(channel, spectrumFrame);
       }
@@ -320,7 +344,7 @@ export async function makeStreamer(inputFormat, { dspDir, queueMs = DEFAULT_IQ_Q
     },
     close() {
       for (const client of clients) remove(client);
-      spectrum.close();
+      spectrum?.close();
       free_iq_buffer(input, INPUT_CAPACITY);
     },
   };

@@ -57,11 +57,16 @@ The runner prints these metrics every 10 seconds:
 | `IQ queue max` | Estimated queue duration, calculated from buffered bytes on the DataChannel and the total send rate of active IQ streams. |
 | `blocked blocks`, `discarded IQ values` | Blocks skipped because the send queue was full, and leftover I/Q values that were not turned into packets. |
 | `slice runs` | Actual slice extraction runs and subscription processing counts. Slices with the same frequency, width, and rate are computed once per capture block. |
-| `PCM packets`, `PCM queue max`, `discarded PCM frames` | Host-mode packets sent, maximum estimated send queue duration, and audio frames skipped because the queue was full. |
+| `accepted PCM packets`, `PCM queue max`, `discarded PCM frames` | Host audio accepted by the native channel, estimated duration of its queue, and audio frames skipped before transport. |
+| `packets queued by native channel`, `native send errors` | IQ or PCM sends that the library queued for later, and sends that threw an error. |
 
 Osmocom's default `rtl_tcp` uses 256 KiB USB blocks. Filling one block takes about 41 ms at 3.2 MSPS, 64 ms at 2.048 MSPS, or 524 ms at 250 kSPS. With HackRF, the interval depends on when `hackrf_transfer` produces data. The default IQ send queue target is 80 ms. You can adjust it with an option such as `--iq-queue-ms 60`. A lower target limits the buildup of old samples but skips samples more often during short transmission stalls. The runner also enforces enough capacity for two packets and an upper byte limit. [Osmocom capture block settings](https://github.com/osmocom/rtl-sdr/blob/master/src/rtl_tcp.c) · [librtlsdr default block size](https://github.com/osmocom/rtl-sdr/blob/master/src/librtlsdr.c)
 
-If audio arrives late, compare these metrics with the receiving browser's **Playback buffer** and **Max arrival gaps**. The queue option only affects IQ sending on the host. The browser's playback buffer and any network delay through TURN also add to listening latency.
+For **Host (audio)**, rising `discarded PCM frames` alongside a full send queue means the runner drops audio before it reaches the browser. The default PCM send limit is 80 ms. Try `--pcm-queue-ms 200` if short stalls fill the queue. The option accepts 40 to 5000 ms, so you can compare a longer queue during a WAN test. A queue absorbs brief stalls and can increase latency. If the queue stays near the limit and drops continue, the connection is falling behind in sustained use. Mono PCM uses about 1.54 Mbps and stereo uses about 3.07 Mbps per listener, before protocol overhead and the waterfall.
+
+`--stats` also shows the selected path, RTT, and SCTP input rate of each client's audio connection. A `relay` candidate on either side means the audio flows through TURN. SCTP input measures bytes accepted into the protocol stack, so it can run ahead of what the browser receives. Compare these numbers with the browser's **Playback buffer**, **Playback gaps**, and **Max arrival gaps**.
+
+For a slow remote path, use `--waterfall-fps 5` to reduce the spectrum and waterfall data sent by the runner. This lowers the maximum FFT payload from about 331 kbps to 83 kbps per listener. Try `--waterfall-fps 0` to isolate audio with the display stream disabled. Tuning and audio still work, and the official site needs no update for this option. This helps if the streams are competing for available bandwidth.
 
 ## Upstream compatibility
 

@@ -128,6 +128,54 @@ test('host mute and queue limits are respected and decoding can switch to IQ and
   }
 });
 
+test('a larger PCM queue limit keeps audio during brief send congestion', async () => {
+  for (const [pcmQueueMs, shouldSend] of [[undefined, false], [200, true]]) {
+    const streamer = await makeStreamer('uint8', { dspDir: process.env.BROWSDR_DSP_DIR, pcmQueueMs, diagnostics: true });
+    try {
+      const { audio, client } = audioClient(streamer);
+      const input = inputSignal('nfm');
+      setVfo(streamer, client, 'nfm');
+      for (let i = 0; i < 8; i++) streamer.samples(input(), radio);
+      assert(audio.packets.length > 0);
+      audio.packets.length = 0;
+      streamer.takeStats();
+
+      audio.pending = AUDIO_RATE * 4 * 0.1; // 100 ms of queued mono PCM
+      streamer.samples(input(), radio);
+      const { pcmPackets, discardedPcmFrames } = streamer.takeStats();
+      assert.equal(pcmPackets > 0, shouldSend);
+      assert.equal(discardedPcmFrames > 0, !shouldSend);
+    } finally {
+      streamer.close();
+    }
+  }
+});
+
+test('host audio counts native queued packets separately from failed sends', async () => {
+  const streamer = await makeStreamer('uint8', { dspDir: process.env.BROWSDR_DSP_DIR, diagnostics: true });
+  try {
+    const { audio, client } = audioClient(streamer);
+    const input = inputSignal('nfm');
+    setVfo(streamer, client, 'nfm');
+    audio.sendMessageBinary = () => false; // libdatachannel buffered this packet.
+    streamer.samples(input(), radio);
+    const queued = streamer.takeStats();
+    assert(queued.pcmPackets > 0);
+    assert.equal(queued.nativeQueuedPackets, queued.pcmPackets);
+    assert.equal(queued.discardedPcmFrames, 0);
+
+    audio.sendMessageBinary = () => { throw new Error('channel closed'); };
+    streamer.samples(input(), radio);
+    const failed = streamer.takeStats();
+    assert(failed.sendErrors > 0);
+    assert(failed.discardedPcmFrames > 0);
+    assert.equal(failed.pcmPackets, 0);
+    assert.equal(failed.nativeQueuedPackets, 0);
+  } finally {
+    streamer.close();
+  }
+});
+
 test('host CW handles a narrow channel and recovers after a sub-Hz setting', async () => {
   const streamer = await makeStreamer('uint8', { dspDir: process.env.BROWSDR_DSP_DIR });
   try {
