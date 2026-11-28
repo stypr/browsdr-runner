@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { devices } from './capture/devices.mjs';
-import { DEFAULT_WATERFALL_FPS } from './dsp/spectrum.mjs';
+import { DEFAULT_WATERFALL_FPS, MAX_WATERFALL_FPS } from './dsp/spectrum.mjs';
 import { DEFAULT_IQ_QUEUE_MS, DEFAULT_PCM_QUEUE_MS } from './dsp/stream.mjs';
 
 const DEFAULT_URL = 'https://browsdr.jlynx.net/';
@@ -11,15 +11,15 @@ const MAX_PCM_QUEUE_MS = 5000;
 export const usage = `Usage: node runner.mjs [options]
   --url URL             BrowSDR HTTPS site (default: ${DEFAULT_URL})
   --backend-url URL     Backend base URL if API and PeerServer are mounted elsewhere
-  --device TYPE         rtl-sdr (default) or hackrf
+  --device TYPE         rtl-sdr (default), rtl-sdr-v4 (including V4L, V4Lc), or hackrf
   --serial ID           RTL index/serial or HackRF serial
   --frequency HZ        Initial center frequency (default: 99900000)
-  --sample-rate HZ      Initial sample rate (RTL: 3200000, HackRF: 20000000)
+  --sample-rate HZ      Initial sample rate (default depends on device)
   --state-dir DIR       Persistent share identity directory
   --dsp-dir DIR         Use a specific BrowSDR WASM bundle directory
   --iq-queue-ms MS      Target native IQ send queue (default: ${DEFAULT_IQ_QUEUE_MS})
   --pcm-queue-ms MS     Host audio send queue limit, 40–${MAX_PCM_QUEUE_MS} ms (default: ${DEFAULT_PCM_QUEUE_MS})
-  --waterfall-fps FPS   Remote spectrum and waterfall rate, 0 to disable (default: ${DEFAULT_WATERFALL_FPS})
+  --waterfall-fps FPS   Override remote spectrum rate, 0 to disable (default: ${DEFAULT_WATERFALL_FPS})
   --stats               Print capture, DSP, queue and audio transport stats every 10 seconds
   --keep-locks          Keep shared RF controls locked
   --relay-only          Use TURN relay candidates on the native host
@@ -60,7 +60,9 @@ export function parseOptions(args = process.argv.slice(2), env = process.env) {
   };
   const site = parseBase(values.url, '--url');
   const backend = values['backend-url'] ? parseBase(values['backend-url'], '--backend-url') : site;
-  if (!Object.hasOwn(devices, values.device)) throw new Error('--device must be rtl-sdr or hackrf.');
+  if (!Object.hasOwn(devices, values.device)) {
+    throw new Error(`Supported --device values: ${Object.keys(devices).join(', ')}`);
+  }
   const device = devices[values.device];
   if (values.serial !== undefined && !/^[a-z0-9_-]{1,80}$/i.test(values.serial)) throw new Error('Invalid --serial.');
   const frequency = Number(values.frequency ?? device.defaults.frequency);
@@ -79,8 +81,8 @@ export function parseOptions(args = process.argv.slice(2), env = process.env) {
     throw new Error(`--pcm-queue-ms must be an integer from 40 to ${MAX_PCM_QUEUE_MS}.`);
   }
   const waterfallFps = Number(values['waterfall-fps'] ?? DEFAULT_WATERFALL_FPS);
-  if (values['waterfall-fps'] === '' || !Number.isInteger(waterfallFps) || waterfallFps < 0 || waterfallFps > DEFAULT_WATERFALL_FPS) {
-    throw new Error(`--waterfall-fps must be an integer from 0 to ${DEFAULT_WATERFALL_FPS}.`);
+  if (values['waterfall-fps'] === '' || !Number.isInteger(waterfallFps) || waterfallFps < 0 || waterfallFps > MAX_WATERFALL_FPS) {
+    throw new Error(`--waterfall-fps must be an integer from 0 to ${MAX_WATERFALL_FPS}.`);
   }
   if (!['auto', 'libwebrtc', 'libdatachannel'].includes(values.webrtc)) {
     throw new Error('--webrtc must be auto, libwebrtc, or libdatachannel.');

@@ -22,6 +22,18 @@ npm start -- --help
 
 When capture and signaling are ready, the runner prints a share code and link. Open the link, unmute the VFO you want to hear, and select a mode under **Source → Decode on**.
 
+The default `rtl-sdr` profile covers RTL-SDR Blog V1, V2 and V3 and other compatible RTL-SDRs in tuner mode. It accepts tuning from 24 MHz. The V3's HF direct-sampling mode is outside this profile's tuning range.
+
+### RTL-SDR Blog V4 and V4 Lite
+
+V4, V4L and V4Lc use the same runner profile. Install a version of `rtl_tcp` and `librtlsdr` that supports your model. See the [V4 driver guide](https://www.rtl-sdr.com/V4/) or the [V4 Lite driver guide](https://www.rtl-sdr.com/V4L/).
+
+```bash
+npm start -- --device rtl-sdr-v4
+```
+
+The profile allows tuning from 500 kHz to 1.766 GHz and starts at 2.4 MSPS for continuous use. Higher sample rates are selectable, but check capture for dropped samples before using them continuously. The driver handles HF upconversion automatically. Add `--device rtl-sdr-v4` to `ExecStart` when running as a systemd service.
+
 ## Listening and tuning
 
 | Decode on | What the runner sends |
@@ -32,6 +44,8 @@ When capture and signaling are ready, the runner prints a share code and link. O
 A VFO pauses below 50 Hz bandwidth. In host mode, narrow VFOs use a lower IF sample rate and WFM below 106 kHz plays in mono. In IQ mode, the slice leaves room for the browser's channel filter.
 
 Clients can change the shared center frequency, sample rate, and gains. Pass `--keep-locks` to lock those controls. For RTL-SDR, the runner applies the most recent requests at 200 ms intervals while keeping the device open. It briefly discards samples after a retune or sample rate change. Gain steps depend on the tuner, and the UI shows the settings applied by the runner because `rtl_tcp` has no command acknowledgement. HackRF reopens capture after a shared RF setting changes.
+
+The runner sends up to 60 spectrum frames per second by default. On a remote connection, the browser's **Spectrum FPS** menu caps rendering at 20, 30, or 60 FPS. The FPS counter reports how many frames the browser actually draws per second.
 
 ## Choose a BrowSDR site
 

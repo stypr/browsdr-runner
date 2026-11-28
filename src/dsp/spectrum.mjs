@@ -4,8 +4,10 @@ import { FFT_SIZE, fftPacket } from '../remote/protocol.mjs';
 const ANALYSIS_SIZE = 65536;
 const IQ_BYTES = ANALYSIS_SIZE * 2;
 const BINS_PER_OUTPUT_BIN = ANALYSIS_SIZE / FFT_SIZE;
-export const DEFAULT_WATERFALL_FPS = 20;
-const SMOOTHING_INTERVAL_MS = 1000 / DEFAULT_WATERFALL_FPS;
+export const MAX_WATERFALL_FPS = 60;
+export const DEFAULT_WATERFALL_FPS = MAX_WATERFALL_FPS;
+// Match the browser's smoothing interval at every frame rate.
+const SMOOTHING_INTERVAL_MS = 50;
 
 export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }, fps = DEFAULT_WATERFALL_FPS) {
   const frameIntervalMs = 1000 / fps;
@@ -21,6 +23,7 @@ export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }, f
   let position = 0;
   let filled = 0;
   let lastFrame;
+  let nextFrame;
 
   return {
     append(samples) {
@@ -37,7 +40,11 @@ export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }, f
       filled = Math.min(IQ_BYTES, filled + samples.length);
     },
     frame(now) {
-      if (filled < IQ_BYTES || (lastFrame !== undefined && now - lastFrame < frameIntervalMs)) return null;
+      if (filled < IQ_BYTES || (nextFrame !== undefined && now + 1e-6 < nextFrame)) return null;
+      // Preserve cadence across uneven capture callbacks and skip missed frames.
+      const deadline = nextFrame ?? now;
+      const intervals = Math.floor((now - deadline + 1e-6) / frameIntervalMs) + 1;
+      nextFrame = deadline + intervals * frameIntervalMs;
 
       const view = new Uint8Array(memory.buffer, input, IQ_BYTES);
       view.set(ring.subarray(position));
@@ -63,6 +70,7 @@ export function makeSpectrum({ FFT, memory, alloc_iq_buffer, free_iq_buffer }, f
       position = 0;
       filled = 0;
       lastFrame = undefined;
+      nextFrame = undefined;
     },
     close() {
       fft.free();

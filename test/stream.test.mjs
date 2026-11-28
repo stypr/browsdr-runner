@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { FFT_SIZE, fftPacket, iqPacket, IQ_OVERHEAD } from '../src/remote/protocol.mjs';
 import { makeStreamer } from '../src/dsp/stream.mjs';
+import { parseOptions } from '../src/cli.mjs';
 
 function channel() {
   return {
@@ -60,6 +61,29 @@ test('lowering or disabling the waterfall leaves host audio running', async (t) 
       streamer.close();
     }
   }
+});
+
+test('the runner sends 60 spectrum FPS by default and honors lower overrides', async (t) => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const raw = Buffer.alloc(131072, 128);
+  const radio = { centerFreq: 100, sampleRate: 2400000 };
+  for (const [args, expectedFps] of [[[], 60], [['--waterfall-fps', '30'], 30], [['--waterfall-fps', '20'], 20]]) {
+    const options = parseOptions(args, {});
+    const streamer = await makeStreamer('uint8', { ...options, dspDir: process.env.BROWSDR_DSP_DIR });
+    try {
+      const fft = channel();
+      streamer.add({ channels: new Map([['fft', fft]]) });
+      for (let tick = 0; tick < 60; tick++) {
+        now = tick * 1000 / 60;
+        streamer.samples(raw, radio);
+      }
+      assert.equal(fft.packets.length, expectedFps);
+    } finally {
+      streamer.close();
+    }
+  }
+  assert.throws(() => parseOptions(['--waterfall-fps', '61'], {}), /0 to 60/);
 });
 
 test('identical slices share DSP while congestion is isolated to the slow subscriber', async () => {
@@ -131,7 +155,7 @@ test('the remote spectrum accumulates, smooths and reduces FFT bins across captu
     const first = fft.packets[0].subarray(-FFT_SIZE);
     assert.equal(first.indexOf(Math.max(...first)), displayBin);
 
-    now = 25;
+    now = 10;
     streamer.samples(Buffer.alloc(6016, 128), radio);
     assert.equal(fft.packets.length, 1);
     now = 50;
