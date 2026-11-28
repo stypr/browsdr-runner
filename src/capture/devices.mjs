@@ -1,21 +1,33 @@
 const slider = (name, min, max, step, initial) => ({ name, min, max, step, default: initial, type: 'slider' });
 
+const rtlSdr = {
+  name: 'RTL-SDR',
+  capabilities: {
+    deviceType: 'rtlsdr', nativeIqBits: 8, sampleFormat: 'uint8',
+    sampleRates: [250000, 1024000, 1536000, 1920000, 2048000, 2160000, 2400000, 2560000, 2880000, 3200000],
+    gainControls: [slider('Tuner Gain', 0, 49.6, 0.1, 0)],
+    frequencyRange: [24000000, 1766000000],
+  },
+  defaults: { rate: 3200000, frequency: 99900000 },
+  command: 'rtl_tcp',
+  args: (frequency, rate, gains, device, host, port) => [
+    ...(device ? ['-d', device] : []), '-a', host, '-p', port,
+    '-f', frequency, '-s', rate, '-g', gains['Tuner Gain'], '-n', 2,
+  ],
+};
+
 // Capabilities are advertised to clients and also constrain incoming tuning requests.
 export const devices = {
-  'rtl-sdr': {
-    name: 'RTL-SDR',
+  'rtl-sdr': rtlSdr,
+  'rtl-sdr-v4': {
+    ...rtlSdr,
+    name: 'RTL-SDR Blog V4',
     capabilities: {
-      deviceType: 'rtlsdr', nativeIqBits: 8, sampleFormat: 'uint8',
-      sampleRates: [250000, 1024000, 1536000, 1920000, 2048000, 2160000, 2400000, 2560000, 2880000, 3200000],
-      gainControls: [slider('Tuner Gain', 0, 49.6, 0.1, 0)],
-      frequencyRange: [24000000, 1766000000],
+      ...rtlSdr.capabilities,
+      // librtlsdr handles the built-in HF upconverter on both V4 and V4 Lite.
+      frequencyRange: [500000, 1766000000],
     },
-    defaults: { rate: 3200000, frequency: 99900000 },
-    command: 'rtl_tcp',
-    args: (frequency, rate, gains, device, host, port) => [
-      ...(device ? ['-d', device] : []), '-a', host, '-p', port,
-      '-f', frequency, '-s', rate, '-g', gains['Tuner Gain'], '-n', 2,
-    ],
+    defaults: { ...rtlSdr.defaults, rate: 2400000 },
   },
   hackrf: {
     name: 'HackRF One',
